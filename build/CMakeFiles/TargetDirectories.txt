@@ -1,3 +1,0 @@
-/home/noe/codes/topics_workqueue/topic_center_rtos/build/CMakeFiles/Dust_InfantryRobotChassis.elf.dir
-/home/noe/codes/topics_workqueue/topic_center_rtos/build/CMakeFiles/edit_cache.dir
-/home/noe/codes/topics_workqueue/topic_center_rtos/build/CMakeFiles/rebuild_cache.dir
