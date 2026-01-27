@@ -1,0 +1,114 @@
+#include "pubsub.hpp"
+#include "SEGGER_RTT.h"
+#include <atomic>
+#include "cmsis_os2.h"
+#include "Init.h"
+
+#define LOG(...) SEGGER_RTT_printf(0, __VA_ARGS__)
+
+// --- 全局变量和定义 ---
+const int NUM_PRODUCERS = 4;
+const int NUM_CONSUMERS = 4;
+const int MESSAGES_PER_PRODUCER = 5000;
+const int TOTAL_MESSAGES = NUM_PRODUCERS * MESSAGES_PER_PRODUCER;
+
+// 使用原子变量进行计数是安全的
+std::atomic<int> received_count(0);
+// 使用事件标志来通知消费者生产者已完成工作
+osEventFlagsId_t producers_done_evt;
+// 新增：记录已完成的生产者数量（用于通知主任务/消费者）
+std::atomic<int> producers_finished(0);
+
+// 共享的订阅者
+std::shared_ptr<Subscriber<int>> stress_sub;
+
+// --- 任务函数 ---
+
+// 生产者任务
+void producer_task(void* argument) {
+    int producer_id = reinterpret_cast<int>(argument);
+    Publisher<int> pub("stress_topic");
+    for (int j = 0; j < MESSAGES_PER_PRODUCER; ++j) {
+        pub.publish(producer_id * MESSAGES_PER_PRODUCER + j);
+        // 在RTOS中，可以加入少量延时让其他任务运行
+        osDelay(1); 
+    }
+    // 标记当前生产者已完成；若全部生产者已完成，则设置事件标志通知消费者/主任务
+    int finished = ++producers_finished;
+    if (finished == NUM_PRODUCERS) {
+        osEventFlagsSet(producers_done_evt, 0x01);
+    }
+    // 任务结束
+    osThreadExit();
+}
+
+// 消费者任务
+void consumer_task(void* argument) {
+    int data;
+    while (true) {
+        // 阻塞等待消息，直到收到（而不是短超时），以便及时消费生产者发布的消息
+        if (stress_sub->getMessage(data, osWaitForever)) {
+            received_count++;
+        } else {
+            // 检查生产者是否已全部完成
+            if (osEventFlagsGet(producers_done_evt) & 0x01) {
+                // 再次尝试清空队列中的剩余消息
+                while (stress_sub->getMessage(data, 0)) {
+                    received_count++;
+                }
+                // 生产者已结束且队列已空，退出任务
+                break; 
+            }
+        }
+    }
+    // 任务结束
+    osThreadExit();
+}
+
+// --- 主应用函数 ---
+void app_main(void* argument) {
+    LOG("--- RTOS Thread-Safe Test ---\n");
+
+    // 创建事件标志，用于同步
+    producers_done_evt = osEventFlagsNew(NULL);
+
+    // 创建一个共享订阅者
+    // 使用大小为1的队列，确保生产者在消费者取走消息前阻塞（实现逐个生产-消费）
+    stress_sub = subscribe<int>("stress_topic", 1);
+
+    // 创建生产者任务
+    for (int i = 0; i < NUM_PRODUCERS; ++i) {
+        osThreadNew(producer_task, reinterpret_cast<void*>(i), NULL);
+    }
+
+    // 创建消费者任务
+    for (int i = 0; i < NUM_CONSUMERS; ++i) {
+        osThreadNew(consumer_task, NULL, NULL);
+    }
+
+    // 等待所有生产者任务结束（使用事件标志，不再使用固定延时）
+    osEventFlagsWait(producers_done_evt, 0x01, osFlagsWaitAny, osWaitForever);
+
+    // 等待所有消息被消费完（由received_count驱动），避免固定等待时间
+    while (received_count.load() < TOTAL_MESSAGES) {
+        // 轻微延时，避免忙等待
+        osDelay(10);
+    }
+
+    // --- 最终统计 ---
+    LOG("\n--- Final Results ---\n");
+    LOG("Total messages published: %d\n", TOTAL_MESSAGES);
+    LOG("Total messages received: %d\n", received_count.load());
+    if (received_count.load() < TOTAL_MESSAGES) {
+        LOG("!!! DATA LOSS DETECTED !!! %d messages were lost.\n", TOTAL_MESSAGES - received_count.load());
+    } else {
+        LOG(">>> SUCCESS: No data loss detected. <<<\n");
+    }
+
+    LOG("\n--- End of RTOS Demo ---\n");
+    
+    // 主应用任务结束
+    osThreadExit();
+}
+
+
