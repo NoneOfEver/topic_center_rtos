@@ -1,0 +1,28 @@
+#IncludeRegexLine: ^[ 	]*[#%][ 	]*(include|import)[ 	]*[<"]([^">]+)([">])
+
+#IncludeRegexScan: ^.*$
+
+#IncludeRegexComplain: ^$
+
+#IncludeRegexTransform: 
+
+/home/noe/codes/topics_workqueue/topic_center_rtos/Board/dm-h723/startup_stm32h723vgtx.s
+
+/home/noe/codes/topics_workqueue/topic_center_rtos/ThirdParty/SEGGER/Config/SEGGER_RTT_Conf.h
+intrinsics.h
+-
+machine.h
+-
+
+/home/noe/codes/topics_workqueue/topic_center_rtos/ThirdParty/SEGGER/RTT/SEGGER_RTT.h
+../Config/SEGGER_RTT_Conf.h
+/home/noe/codes/topics_workqueue/topic_center_rtos/ThirdParty/SEGGER/Config/SEGGER_RTT_Conf.h
+stdlib.h
+-
+stdarg.h
+-
+
+/home/noe/codes/topics_workqueue/topic_center_rtos/ThirdParty/SEGGER/RTT/SEGGER_RTT_ASM_ARMv7M.s
+SEGGER_RTT.h
+/home/noe/codes/topics_workqueue/topic_center_rtos/ThirdParty/SEGGER/RTT/SEGGER_RTT.h
+

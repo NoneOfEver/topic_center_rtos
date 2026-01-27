@@ -2,4 +2,4 @@
 /OPTIMIZATION_GUIDE.txt
 /OPTIMIZATION_RESULTS.md
 .cache/
-.build//build/
+./build/
