@@ -81,6 +81,7 @@ include_directories(
         ThirdParty/SEGGER/RTT
         topic_center
         uorb_lite
+        daemon_supervisor
 )
 
 add_definitions(
@@ -97,6 +98,7 @@ file(
     "topic_center/*.*"
     "main.cpp"
     "worker_task_example.cpp"
+    "daemon_supervisor/*.*"
 )
 
 set(LINKER_SCRIPT ${CMAKE_SOURCE_DIR}/Board/dm-h723/STM32H723VGTX_FLASH.ld)

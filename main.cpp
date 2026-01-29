@@ -1,199 +1,206 @@
+/**
+ * @file main.cpp
+ * @brief 守护监督系统演示程序
+ * 
+ * 本文件演示了 DaemonSupervisor 系统的完整使用流程：
+ * 1. 创建和配置 DaemonClient
+ * 2. 注册到 DaemonSupervisor
+ * 3. 设置故障回调和硬件看门狗
+ * 4. 启动守护任务
+ * 5. 模拟模块的正常运行和故障场景
+ */
+
+#ifdef __ARM_ARCH
+
 #include "cmsis_os2.h"
-#include "uorb_lite/uorb_topics.hpp"
-#include "uorb_lite/uorb_lite.hpp"
-#include <cstdio>
 #include <cstdint>
-#include <atomic>
-#include <limits>
-#include <SEGGER_RTT.h>
+#include <cstdio>
+#include "daemon_client.hpp"
+#include "supervisor.hpp"
+#include "SEGGER_RTT.h"
 #include "Init.h"
-#include "main.h"
+
 
 #define LOG(...) SEGGER_RTT_printf(0, __VA_ARGS__)
 
-/*========================
-  配置
-========================*/
-constexpr int NUM_PUBLISHERS = 2;
-constexpr int NUM_SUBSCRIBERS = 3;
-constexpr int PUBLISH_RATE_HZ = 1000;  // 每秒 1000 次
-constexpr int RING_DEPTH = 32;
+// =============================================================================
+// 回调函数定义
+// =============================================================================
 
-/*========================
-  Topic 定义
-========================*/
-struct TestData {
-    uint32_t counter;
-    uint32_t timestamp_us;
-};
+/**
+ * @brief IMU 模块故障回调
+ * 
+ * 当 IMU 客户端超时离线时被调用。
+ * 这是模块级别的回调，用于处理特定模块的故障。
+ * 
+ * @param c 触发故障的客户端引用
+ * 
+ * 实际应用中可以：
+ * - 切换到备用传感器
+ * - 使用上一次的有效数据
+ * - 发送告警消息
+ */
+void imu_fault(DaemonClient& c) {
+    LOG("[Callback] IMU fault! Owner=%p\n", c.owner());
+    // 实际应用：可以在这里切换到备用 IMU 或使用预测值
+}
 
-inline UORBRingTopic<TestData, RING_DEPTH> test_topic;
+/**
+ * @brief 控制模块故障回调
+ * 
+ * 当控制客户端超时离线时被调用。
+ * 控制模块通常是 FATAL 级别，会触发系统级故障钩子。
+ */
+void control_fault(DaemonClient& c) {
+    LOG("[Callback] CONTROL fault! Owner=%p\n", c.owner());
+    // 实际应用：紧急停止电机输出
+}
 
-/*========================
-  Subscriber 状态结构
-========================*/
-struct SubscriberStat {
-    std::atomic<uint32_t> received{0};
-    std::atomic<uint32_t> lost{0};
-    std::atomic<uint32_t> latency_sum{0};
-    std::atomic<uint32_t> latency_min{std::numeric_limits<uint32_t>::max()};
-    std::atomic<uint32_t> latency_max{0};
-};
+/**
+ * @brief 系统级故障钩子
+ * 
+ * 当 FATAL 级别的客户端离线时被调用。
+ * 这是全局的紧急处理，应该执行系统级的安全操作。
+ * 
+ * @param c 触发故障的客户端引用
+ * 
+ * 典型操作：
+ * - 紧急停止所有电机
+ * - 切换到安全模式
+ * - 触发软件复位
+ * - 保存故障日志
+ */
+void system_fault(DaemonClient& c) {
+    LOG("[SystemHook] FATAL client offline! Owner=%p -> System reset!\n", c.owner());
+    // 实际应用：
+    // - 停止所有电机输出
+    // - 断开功率输出
+    // - 可选：触发系统复位 NVIC_SystemReset();
+}
 
-SubscriberStat sub_stats[NUM_SUBSCRIBERS];
+/**
+ * @brief 硬件看门狗喂狗函数
+ * 
+ * 只有当所有 CRITICAL 优先级的客户端都在线时才会被调用。
+ * 这确保了关键模块故障时，硬件看门狗会超时复位系统。
+ * 
+ * 实际应用中应该调用硬件看门狗外设的喂狗函数：
+ * - STM32 独立看门狗: HAL_IWDG_Refresh(&hiwdg);
+ * - STM32 窗口看门狗: HAL_WWDG_Refresh(&hwwdg);
+ */
+void hw_feed_demo() {
+    LOG("[HW Feed] Hardware watchdog fed\n");
+    // 实际应用：HAL_IWDG_Refresh(&hiwdg);
+}
 
-/*========================
-  高精度计数函数
-========================*/
-inline uint32_t get_microseconds() {
-#ifdef __ARM_ARCH
-    // STM32 用 DWT->CYCCNT
-    return DWT->CYCCNT / (SystemCoreClock / 1000000);
-#else
-    // SITL / PC 模拟
-    return static_cast<uint32_t>(
-        std::chrono::duration_cast<std::chrono::microseconds>(
-            std::chrono::high_resolution_clock::now().time_since_epoch()
-        ).count()
+// // -----------------------------
+// // CMSIS-RTOS2 daemon task (已移至 daemon_task.cpp)
+// // -----------------------------
+// void daemon_task(void* arg) {
+//     (void)arg;
+//     uint32_t now_ms = 0;
+//     while(1) {
+//         DaemonSupervisor::tick(now_ms);
+//         now_ms += 10; // tick every 10ms -> 100Hz
+//         osDelay(10);
+//     }
+// }
+
+// =============================================================================
+// 主函数
+// =============================================================================
+
+/**
+ * @brief 应用程序主入口
+ * 
+ * 演示守护监督系统的完整使用流程。
+ * 
+ * 场景说明：
+ * ──────────
+ * - imu_client:  超时 50ms, DEGRADED 级别, NORMAL 优先级
+ *                -> 超时只触发回调，不影响系统
+ * 
+ * - ctrl_client: 超时 30ms, FATAL 级别, CRITICAL 优先级
+ *                -> 超时触发回调 + 系统钩子，并停止喂硬件看门狗
+ * 
+ * 模拟行为：
+ * - IMU 每 10ms feed 一次（正常）
+ * - Control 只在前 300ms 内 feed（之后超时）
+ */
+void app_main(void* argument){
+
+    // ===== 第一步：初始化守护监督者 =====
+    DaemonSupervisor::init();
+
+    // 创建模拟的"拥有者"对象
+    // 实际应用中这会是真正的模块对象指针
+    int imu_obj = 1;
+    int ctrl_obj = 2;
+
+    // ===== 第二步：创建 DaemonClient 实例 =====
+    
+    /**
+     * IMU 客户端配置：
+     * - 超时: 50ms (需要 > 50ms 不喂狗才会离线)
+     * - 回调: imu_fault
+     * - 拥有者: &imu_obj (实际应用中是 IMU 模块指针)
+     * - 域: SENSOR
+     * - 故障等级: DEGRADED (降级运行，不触发系统钩子)
+     * - 优先级: NORMAL (不影响硬件看门狗)
+     */
+    DaemonClient imu_client(
+        50, imu_fault, &imu_obj,
+        DaemonClient::Domain::SENSOR,
+        DaemonClient::FaultLevel::DEGRADED,
+        DaemonClient::Priority::NORMAL
     );
+
+    /**
+     * 控制客户端配置：
+     * - 超时: 30ms (需要 > 30ms 不喂狗才会离线)
+     * - 回调: control_fault
+     * - 拥有者: &ctrl_obj
+     * - 域: CONTROL
+     * - 故障等级: FATAL (触发系统故障钩子)
+     * - 优先级: CRITICAL (影响硬件看门狗喂狗)
+     */
+    DaemonClient ctrl_client(
+        30, control_fault, &ctrl_obj,
+        DaemonClient::Domain::CONTROL,
+        DaemonClient::FaultLevel::FATAL,
+        DaemonClient::Priority::CRITICAL
+    );
+
+    // ===== 第三步：注册客户端到监督者 =====
+    DaemonSupervisor::register_client(&imu_client);
+    DaemonSupervisor::register_client(&ctrl_client);
+    
+    // ===== 第四步：设置回调钩子 =====
+    DaemonSupervisor::set_system_fault_hook(system_fault);
+    DaemonSupervisor::set_hw_feed(hw_feed_demo);
+
+    // ===== 第五步：启动守护任务 =====
+    // daemon_task 在独立任务中周期调用 tick()
+    osThreadNew(daemon_task, nullptr, nullptr);
+
+    // ===== 第六步：模拟模块运行 =====
+    // 这里模拟应用层的喂狗行为
+    uint32_t now_ms = 0;
+    while(1) {
+        // IMU 每次都喂狗 -> 保持在线
+        imu_client.feed(now_ms);
+        
+        // Control 只在前 300ms 内喂狗
+        // 之后停止喂狗 -> 会在 30ms 后超时
+        // 预期行为：
+        // - 触发 control_fault 回调
+        // - 触发 system_fault 系统钩子（因为是 FATAL）
+        // - 停止喂硬件看门狗（因为是 CRITICAL 且离线）
+        if(now_ms < 30*10) ctrl_client.feed(now_ms);
+
+        now_ms += 10;
+        LOG("Alive...\n");
+        osDelay(10);
+    }
+}
 #endif
-}
-
-/*========================
-  发布者 Task
-========================*/
-void PublisherTask(void* arg)
-{
-    int id = (int)(intptr_t)arg;
-    TestData data{};
-    uint32_t counter = 0;
-    const uint32_t period_us = 1000000 / PUBLISH_RATE_HZ;
-
-    while (1) {
-        uint32_t start_us = get_microseconds();
-
-        data.counter = counter++;
-        data.timestamp_us = start_us;
-
-        test_topic.publish(data);
-
-        // 控制发布频率
-        while ((get_microseconds() - start_us) < period_us) {
-            osThreadYield();  // 让出 CPU
-        }
-    }
-}
-
-/*========================
-  订阅者 Task
-========================*/
-void SubscriberTask(void* arg)
-{
-    int id = (int)(intptr_t)arg;
-    UORBRingSub<TestData, RING_DEPTH> sub(test_topic);
-
-    uint32_t last_counter = 0;
-
-    while (1) {
-        TestData data;
-        while (sub.copy(data)) {
-            sub_stats[id].received.fetch_add(1);
-
-            // 丢帧检测
-            if (last_counter != 0 && data.counter != last_counter + 1) {
-                uint32_t lost_frames = (data.counter > last_counter + 1) ? data.counter - last_counter - 1 : 0;
-                sub_stats[id].lost.fetch_add(lost_frames);
-            }
-
-            // 延迟统计（注意：timestamp_us 使用微秒）
-            uint32_t latency = get_microseconds() - data.timestamp_us; // microseconds
-            sub_stats[id].latency_sum.fetch_add(latency);
-
-            // 最大延迟
-            uint32_t prev_max = sub_stats[id].latency_max.load();
-            while (latency > prev_max &&
-                   !sub_stats[id].latency_max.compare_exchange_weak(prev_max, latency)) {
-                // retry
-            }
-
-            // 最小延迟
-            uint32_t prev_min = sub_stats[id].latency_min.load();
-            while (latency < prev_min &&
-                   !sub_stats[id].latency_min.compare_exchange_weak(prev_min, latency)) {
-                // retry
-            }
-
-            last_counter = data.counter;
-        }
-        osThreadYield(); // 避免完全 busy loop
-    }
-}
-
-/*========================
-  监控 Task
-========================*/
-void MonitorTask(void* arg)
-{
-    while (1) {
-        osDelay(1000); // 每秒统计一次
-
-        LOG("===== Performance Monitor =====\n");
-        for (int i = 0; i < NUM_SUBSCRIBERS; ++i) {
-            uint32_t received = sub_stats[i].received.exchange(0);
-            uint32_t lost = sub_stats[i].lost.exchange(0);
-            uint32_t sum_latency = sub_stats[i].latency_sum.exchange(0); // microseconds
-            uint32_t min_latency = sub_stats[i].latency_min.exchange(std::numeric_limits<uint32_t>::max()); // microseconds
-            uint32_t max_latency = sub_stats[i].latency_max.exchange(0); // microseconds
-
-            // 避免使用浮点打印（嵌入式 printf 常常不支持 %f），改用整数和字符串缓冲格式化输出
-            uint32_t total = received + lost;
-            // 以万分比表示丢包率，保留两位小数（例如 12.34%% -> 1234）
-            uint32_t lost_permyriad = total ? (uint32_t)((uint64_t)lost * 10000 / total) : 0;
-            // 平均延迟单位为微秒（us）
-            uint32_t avg_us = received ? (uint32_t)(sum_latency / received) : 0;
-
-            char lost_rate_buf[16];
-            char avg_buf[24];
-            char min_buf[24];
-            char max_buf[24];
-
-            // 生成字符串，示例格式："12.34%"、"3000us"
-            snprintf(lost_rate_buf, sizeof(lost_rate_buf), "%u.%02u%%", lost_permyriad / 100, lost_permyriad % 100);
-            snprintf(avg_buf, sizeof(avg_buf), "%u us", avg_us);
-
-            if (received == 0) {
-                snprintf(min_buf, sizeof(min_buf), "N/A");
-                snprintf(max_buf, sizeof(max_buf), "N/A");
-            } else {
-                // min_latency/max_latency 单位已为微秒
-                snprintf(min_buf, sizeof(min_buf), "%u us", min_latency);
-                snprintf(max_buf, sizeof(max_buf), "%u us", max_latency);
-            }
-
-            LOG("Subscriber %d: recv=%u, lost=%u, lost_rate=%s, latency: avg=%s, min=%s, max=%s\n",
-                i, received, lost, lost_rate_buf, avg_buf, min_buf, max_buf);
-        }
-        LOG("\n");
-    }
-}
-
-/*========================
-  Main
-========================*/
-void app_main(void* argument)
-{
-    // 创建发布者
-    for (int i = 0; i < NUM_PUBLISHERS; ++i) {
-        osThreadNew(PublisherTask, (void*)(intptr_t)i, NULL);
-    }
-
-    // 创建订阅者
-    for (int i = 0; i < NUM_SUBSCRIBERS; ++i) {
-        osThreadNew(SubscriberTask, (void*)(intptr_t)i, NULL);
-    }
-
-    // 创建监控任务
-    osThreadNew(MonitorTask, nullptr, NULL);
-
-    while (1);
-}
